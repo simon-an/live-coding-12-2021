@@ -1,23 +1,33 @@
+
 use eframe::{egui, epi};
+use github_client::repos_response::{Repositories};
+use log::info;
+use tokio::sync::mpsc::Sender;
+use tokio::sync::watch::{Receiver};
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 #[cfg_attr(feature = "persistence", derive(serde::Deserialize, serde::Serialize))]
 #[cfg_attr(feature = "persistence", serde(default))] // if we add new fields, give them default values when deserializing old state
 pub struct TemplateApp {
-    // Example stuff:
     label: String,
 
     // this how you opt-out of serialization of a member
     #[cfg_attr(feature = "persistence", serde(skip))]
     value: f32,
+    rx: Receiver<Repositories>,
+    // state: Option<&'a Repositories>,
+    // state: Option<Repositories>,
+    //  phantom: PhantomData<&'a Repositories>,
+    clone_channel: Sender<String>,
 }
 
-impl Default for TemplateApp {
-    fn default() -> Self {
+impl TemplateApp {
+    pub fn new(rx: Receiver<Repositories>, clone_channel: Sender<String>) -> Self {
         Self {
-            // Example stuff:
-            label: "Hello World!".to_owned(),
-            value: 2.7,
+            label: String::from("Github Client"),
+            value: 0.0,
+            rx,
+            clone_channel,
         }
     }
 }
@@ -49,10 +59,15 @@ impl epi::App for TemplateApp {
         epi::set_value(storage, epi::APP_KEY, self);
     }
 
-    /// Called each time the UI needs repainting, which may be many times per second.
+    /// Called each time the UI needss repainting, which may be many times per second.
     /// Put your widgets into a `SidePanel`, `TopPanel`, `CentralPanel`, `Window` or `Area`.
     fn update(&mut self, ctx: &egui::CtxRef, frame: &mut epi::Frame<'_>) {
-        let Self { label, value } = self;
+        let Self {
+            label,
+            rx,
+            clone_channel,
+            ..
+        } = self;
 
         // Examples of how to create different panels and windows.
         // Pick whichever suits you.
@@ -78,9 +93,37 @@ impl epi::App for TemplateApp {
                 ui.text_edit_singleline(label);
             });
 
-            ui.add(egui::Slider::new(value, 0.0..=10.0).text("value"));
-            if ui.button("Increment").clicked() {
-                *value += 1.0;
+            if ui.button("Clone All repos").clicked() {
+                let lock = rx.borrow();
+                let repos = &*lock;
+
+                let repo = if repos.len() > 0 {
+                    Some(&repos[0])
+                } else {
+                    None
+                };
+
+                match repo {
+                    Some(repo) => {
+                        let url = repo.clone_url.clone();
+                        info!("url {url}");
+                        let clone_channel = clone_channel.clone();
+                        tokio::task::block_in_place(move || {
+                            tokio::runtime::Handle::current().block_on(async move {
+                                info!("block_in_place");
+                                // do something async
+                                let r = clone_channel.send(url).await;
+                                match r {
+                                    Ok(_) => info!("send clone repo command"),
+                                    Err(e) => log::error!(
+                                        "error {e} while waiting for send clone repo command"
+                                    ),
+                                }
+                            });
+                        });
+                    }
+                    None => log::error!("Repositories is empty"),
+                }
             }
 
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
@@ -96,13 +139,21 @@ impl epi::App for TemplateApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             // The central panel the region left after adding TopPanel's and SidePanel's
+            ui.vertical_centered(|ui| {
+                let lock = rx.borrow();
+                let repos = &*lock;
 
-            ui.heading("eframe template");
-            ui.hyperlink("https://github.com/emilk/eframe_template");
-            ui.add(egui::github_link_file!(
-                "https://github.com/emilk/eframe_template/blob/master/",
-                "Source code."
-            ));
+                for repo in repos {
+                    ui.label(repo.full_name.clone());
+                }
+                drop(lock);
+            });
+            // ui.heading("eframe template");
+            // ui.hyperlink("https://github.com/emilk/eframe_template");
+            // ui.add(egui::github_link_file!(
+            //     "https://github.com/emilk/eframe_template/blob/master/",
+            //     "Source code."
+            // ));
             egui::warn_if_debug_build(ui);
         });
 
